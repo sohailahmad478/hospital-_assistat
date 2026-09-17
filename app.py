@@ -2,25 +2,23 @@ import streamlit as st
 
 st.set_page_config(page_title="Hospital Knowledge Assistant", page_icon="🏥", layout="centered")
 
-# ---- Import heavy deps with visible error reporting ----
 try:
-    import faiss
-    import pickle
+    import json
     import numpy as np
     from sentence_transformers import SentenceTransformer
     from groq import Groq
 except Exception as e:
-    st.error("A required package failed to import. See details below.")
+    st.error("A required package failed to import.")
     st.exception(e)
     st.stop()
 
 # ---- Config ----
-INDEX_DIR = "faiss_index"
+EMBEDDINGS_FILE = "embeddings.npy"
+METADATA_FILE = "chunks_metadata.json"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 GROQ_MODEL = "openai/gpt-oss-120b"
 TOP_K = 4
 
-# ---- Load API key from Streamlit secrets ----
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY not found in secrets. Add it in Streamlit Cloud → Settings → Secrets.")
@@ -29,39 +27,32 @@ if not GROQ_API_KEY:
 client = Groq(api_key=GROQ_API_KEY)
 
 @st.cache_resource
-def load_index_and_model():
-    index = faiss.read_index(f"{INDEX_DIR}/index.faiss")
-    with open(f"{INDEX_DIR}/index.pkl", "rb") as f:
-        docstore, index_to_docstore_id = pickle.load(f)
+def load_data():
+    embeddings = np.load(EMBEDDINGS_FILE)
+    with open(METADATA_FILE, "r", encoding="utf-8") as f:
+        chunks = json.load(f)
     model = SentenceTransformer(EMBEDDING_MODEL)
-    return index, docstore, index_to_docstore_id, model
+    return embeddings, chunks, model
 
 try:
-    index, docstore, index_to_docstore_id, embed_model = load_index_and_model()
+    embeddings, chunks, embed_model = load_data()
 except Exception as e:
-    st.error("Failed to load the FAISS index or embedding model.")
+    st.error("Failed to load embeddings or metadata.")
     st.exception(e)
     st.stop()
 
 def get_relevant_chunks(query, k=TOP_K):
-    query_vec = embed_model.encode([query], convert_to_numpy=True)
-    distances, indices = index.search(query_vec, k)
-    results = []
-    for idx in indices[0]:
-        if idx == -1:
-            continue
-        doc_id = index_to_docstore_id[idx]
-        doc = docstore.search(doc_id)
-        results.append(doc)
-    return results
+    query_vec = embed_model.encode([query], convert_to_numpy=True)[0]
+    query_vec = query_vec / np.clip(np.linalg.norm(query_vec), 1e-10, None)
+    scores = embeddings @ query_vec
+    top_idx = np.argsort(scores)[::-1][:k]
+    return [chunks[i] for i in top_idx]
 
-def build_context(chunks):
-    context_blocks = []
-    for i, c in enumerate(chunks):
-        dept = c.metadata.get("department", "unknown")
-        src = c.metadata.get("source_file", "unknown")
-        context_blocks.append(f"[Source {i+1}: {src} | Department: {dept}]\n{c.page_content}")
-    return "\n\n".join(context_blocks)
+def build_context(selected_chunks):
+    blocks = []
+    for i, c in enumerate(selected_chunks):
+        blocks.append(f"[Source {i+1}: {c['source_file']} | Department: {c['department']}]\n{c['text']}")
+    return "\n\n".join(blocks)
 
 def ask_groq(question, context):
     system_prompt = (
@@ -105,8 +96,8 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Searching knowledge base..."):
-            chunks = get_relevant_chunks(question)
-            context = build_context(chunks)
+            selected = get_relevant_chunks(question)
+            context = build_context(selected)
 
         with st.spinner("Generating answer..."):
             answer = ask_groq(question, context)
@@ -115,13 +106,11 @@ if question:
 
         sources = []
         seen = set()
-        for c in chunks:
-            src = c.metadata.get("source_file", "unknown")
-            dept = c.metadata.get("department", "unknown")
-            key = (src, dept)
+        for c in selected:
+            key = (c["source_file"], c["department"])
             if key not in seen:
                 seen.add(key)
-                sources.append({"source_file": src, "department": dept})
+                sources.append({"source_file": c["source_file"], "department": c["department"]})
 
         with st.expander("📄 Sources"):
             for s in sources:
