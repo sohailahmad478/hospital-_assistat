@@ -1,17 +1,24 @@
 import streamlit as st
-import faiss
-import pickle
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from groq import Groq
+
+st.set_page_config(page_title="Hospital Knowledge Assistant", page_icon="🏥", layout="centered")
+
+# ---- Import heavy deps with visible error reporting ----
+try:
+    import faiss
+    import pickle
+    import numpy as np
+    from sentence_transformers import SentenceTransformer
+    from groq import Groq
+except Exception as e:
+    st.error("A required package failed to import. See details below.")
+    st.exception(e)
+    st.stop()
 
 # ---- Config ----
 INDEX_DIR = "faiss_index"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 GROQ_MODEL = "openai/gpt-oss-120b"
 TOP_K = 4
-
-st.set_page_config(page_title="Hospital Knowledge Assistant", page_icon="🏥", layout="centered")
 
 # ---- Load API key from Streamlit secrets ----
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
@@ -29,7 +36,12 @@ def load_index_and_model():
     model = SentenceTransformer(EMBEDDING_MODEL)
     return index, docstore, index_to_docstore_id, model
 
-index, docstore, index_to_docstore_id, embed_model = load_index_and_model()
+try:
+    index, docstore, index_to_docstore_id, embed_model = load_index_and_model()
+except Exception as e:
+    st.error("Failed to load the FAISS index or embedding model.")
+    st.exception(e)
+    st.stop()
 
 def get_relevant_chunks(query, k=TOP_K):
     query_vec = embed_model.encode([query], convert_to_numpy=True)
