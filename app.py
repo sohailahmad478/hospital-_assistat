@@ -1,6 +1,8 @@
 import streamlit as st
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+import faiss
+import pickle
+import numpy as np
+from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 # ---- Config ----
@@ -11,7 +13,7 @@ TOP_K = 4
 
 st.set_page_config(page_title="Hospital Knowledge Assistant", page_icon="🏥", layout="centered")
 
-# ---- Load API key from Streamlit secrets (never shown/typed in UI) ----
+# ---- Load API key from Streamlit secrets ----
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY not found in secrets. Add it in Streamlit Cloud → Settings → Secrets.")
@@ -19,21 +21,26 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# ---- Cache the embeddings model and FAISS index so they load once ----
 @st.cache_resource
-def load_vectorstore():
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    vectorstore = FAISS.load_local(
-        INDEX_DIR,
-        embeddings,
-        allow_dangerous_deserialization=True
-    )
-    return vectorstore
+def load_index_and_model():
+    index = faiss.read_index(f"{INDEX_DIR}/index.faiss")
+    with open(f"{INDEX_DIR}/index.pkl", "rb") as f:
+        docstore, index_to_docstore_id = pickle.load(f)
+    model = SentenceTransformer(EMBEDDING_MODEL)
+    return index, docstore, index_to_docstore_id, model
 
-vectorstore = load_vectorstore()
+index, docstore, index_to_docstore_id, embed_model = load_index_and_model()
 
 def get_relevant_chunks(query, k=TOP_K):
-    results = vectorstore.similarity_search(query, k=k)
+    query_vec = embed_model.encode([query], convert_to_numpy=True)
+    distances, indices = index.search(query_vec, k)
+    results = []
+    for idx in indices[0]:
+        if idx == -1:
+            continue
+        doc_id = index_to_docstore_id[idx]
+        doc = docstore.search(doc_id)
+        results.append(doc)
     return results
 
 def build_context(chunks):
@@ -69,7 +76,6 @@ st.caption("Ask a question about hospital policies. Answers are grounded in your
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Render chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -78,7 +84,6 @@ for msg in st.session_state.messages:
                 for s in msg["sources"]:
                     st.markdown(f"- **{s['source_file']}** ({s['department']})")
 
-# Chat input
 question = st.chat_input("Ask a question about hospital policy...")
 
 if question:
